@@ -1,0 +1,19 @@
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/
+
+# Build output
+/dist/
+
+# Node
+/ui-tests/node_modules/
+
+# E2E test target (compiled from tests/support/gtk_target.c)
+/src-tauri/tests/support/gtk_target
+
+# Editores e SO
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

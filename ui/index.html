@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ghostwriter</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="head">
+        <div>
+          <h1>Ghostwriter</h1>
+          <p class="sub">Digita o seu texto no app que estiver em foco, na velocidade de uma pessoa.</p>
+        </div>
+        <div class="wpm-badge" aria-live="polite">
+          <span id="wpmValue">60</span><small>WPM</small>
+        </div>
+      </header>
+
+      <div id="hint" class="hint" hidden></div>
+
+      <section class="card text-card">
+        <div class="card-head">
+          <label class="label" for="text">Texto</label>
+          <div class="card-actions">
+            <button id="pasteBtn" class="ghost" type="button">Colar da área de transferência</button>
+            <button id="clearBtn" class="ghost subtle" type="button">Limpar</button>
+          </div>
+        </div>
+        <textarea
+          id="text"
+          spellcheck="false"
+          placeholder="Cole aqui o conteúdo que será digitado…"
+          aria-describedby="counters"
+        ></textarea>
+        <div id="counters" class="counters">
+          <span><strong id="charCount">0</strong> caracteres</span>
+          <span><strong id="wordCount">0</strong> palavras</span>
+          <span>duração estimada <strong id="eta">0:00</strong></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="grid">
+          <div class="field">
+            <div class="field-head">
+              <label class="label" for="wpm">Velocidade</label>
+              <output id="wpmOut">60 WPM · 200 ms/caractere</output>
+            </div>
+            <input id="wpm" type="range" min="60" max="300" step="1" value="60" />
+            <div class="ticks"><span>60</span><span>180</span><span>300</span></div>
+          </div>
+
+          <div class="field">
+            <div class="field-head">
+              <label class="label" for="delay">Tempo para focar a janela</label>
+              <output id="delayOut">3 s</output>
+            </div>
+            <input id="delay" type="range" min="0" max="10" step="1" value="3" />
+            <div class="ticks"><span>0 s</span><span>5 s</span><span>10 s</span></div>
+          </div>
+        </div>
+
+        <label class="check" id="focusRow">
+          <input id="abortOnFocus" type="checkbox" checked />
+          <span>
+            Parar se eu trocar de janela
+            <small id="focusNote">Protege contra digitar no lugar errado.</small>
+          </span>
+        </label>
+      </section>
+
+      <section class="card run">
+        <div class="progress-wrap">
+          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBar">
+            <div class="bar" id="bar"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="phaseLabel">Pronto</span>
+            <span id="progressText">0 / 0</span>
+          </div>
+        </div>
+
+        <div class="controls">
+          <button id="startBtn" class="primary" type="button">
+            <span id="startLabel">Iniciar</span>
+          </button>
+          <button id="pauseBtn" class="secondary" type="button" disabled>Pausar</button>
+          <button id="cancelBtn" class="danger" type="button" disabled>Cancelar</button>
+        </div>
+
+        <p class="shortcuts" id="shortcuts"></p>
+        <p class="error" id="error" hidden></p>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

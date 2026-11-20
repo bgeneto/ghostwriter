@@ -1,0 +1,366 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer commit on the same branch makes an in-flight run obsolete, except for
+# tag builds, which must always finish so a release is never left half-published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep LTO linking inside the memory budget of the standard runners.
+  CARGO_BUILD_JOBS: 2
+  # Fail fast on warnings in CI, but keep build output readable.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint, format and unit/integration tests. No display required, so this runs
+  # on plain Linux runners and is the fastest feedback loop.
+  # ---------------------------------------------------------------------------
+  check:
+    name: fmt / clippy / tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libxkbcommon-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: rustfmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: unit and integration tests
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo test --manifest-path src-tauri/Cargo.toml --test engine_e2e
+
+  # ---------------------------------------------------------------------------
+  # The UI talks to Rust through string command names and camelCase payloads.
+  # These tests pin that contract, so a renamed command fails here instead of in
+  # a release build.
+  # ---------------------------------------------------------------------------
+  ui-tests:
+    name: UI contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui-tests/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ui-tests
+        run: npm ci
+
+      - name: Run UI tests
+        working-directory: ui-tests
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # End-to-end keystroke injection on Windows.
+  #
+  # The GitHub Windows runner has an interactive desktop session, which is what
+  # these tests need: they create a real window with a real EDIT control and
+  # take the foreground. They assert on what the control received, so they fail
+  # loudly if accents or newlines stop arriving.
+  # ---------------------------------------------------------------------------
+  e2e-windows:
+    name: E2E input (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Run keystroke injection tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test e2e_windows_input -- --test-threads=1 --nocapture
+        shell: pwsh
+
+  # ---------------------------------------------------------------------------
+  # End-to-end keystroke injection on Linux/X11.
+  #
+  # Instead of relying on a desktop session, this starts a throwaway Xvfb
+  # display and a lightweight window manager (needed for focus), then runs the
+  # GTK target against it. Same assertions as Windows: the widget must receive
+  # the accented text verbatim.
+  # ---------------------------------------------------------------------------
+  e2e-linux:
+    name: E2E input (Linux/X11)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and X11 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libxkbcommon-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
+            pkg-config \
+            xvfb openbox x11-utils xdotool
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Start Xvfb and a window manager
+        run: |
+          # Xvfb has no compositor, so the toolkit must be told to use X11.
+          Xvfb :99 -screen 0 1280x1024x24 &
+          sleep 2
+          # openbox is only needed so a window can actually take focus.
+          DISPLAY=:99 openbox &
+          sleep 1
+          DISPLAY=:99 xdpyinfo | head -3
+
+      - name: Run keystroke injection tests
+        env:
+          DISPLAY: ":99"
+          # Belt and braces: the test also forces this for the GTK target.
+          GDK_BACKEND: x11
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test e2e_linux_input -- --test-threads=1 --nocapture
+
+  # ---------------------------------------------------------------------------
+  # Windows release artifacts. Builds the portable exe, the zip, the MSI and the
+  # NSIS installer, then *verifies the portable binary actually launches* before
+  # anything is uploaded. A portable build that does not start is worse than no
+  # build at all.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build + verify portable (Windows)
+    needs: [check, ui-tests, e2e-windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build all Windows artifacts
+        run: pwsh -File scripts/dist.ps1
+        shell: pwsh
+
+      - name: Verify the portable binary launches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem dist/*-portable.exe | Select-Object -First 1
+          if (-not $exe) { throw "no portable exe was produced" }
+
+          Write-Host "launching $($exe.Name)"
+          $proc = Start-Process -FilePath $exe.FullName -PassThru
+
+          # Give the webview time to create its window. Poll instead of a fixed
+          # sleep so a fast runner is not punished and a slow one is not flaky.
+          $deadline = (Get-Date).AddSeconds(60)
+          $title = ''
+          while ((Get-Date) -lt $deadline) {
+            if ($proc.HasExited) {
+              throw "the portable build exited immediately with code $($proc.ExitCode)"
+            }
+            $proc.Refresh()
+            if ($proc.MainWindowTitle) { $title = $proc.MainWindowTitle; break }
+            Start-Sleep -Milliseconds 500
+          }
+
+          if (-not $title) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "the portable build never opened a window"
+          }
+
+          Write-Host "window title: '$title'"
+          Write-Host "working set : $([math]::Round($proc.WorkingSet64 / 1MB, 1)) MB"
+
+          Stop-Process -Id $proc.Id -Force
+          Start-Sleep -Milliseconds 500
+          if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
+            throw "the process did not terminate"
+          }
+          Write-Host "portable build verified"
+
+      - name: Verify the MSI and installer are well-formed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-Magic([string]$path) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)[0..3]
+            ($bytes | ForEach-Object { $_.ToString('X2') }) -join ' '
+          }
+
+          # Ordered on purpose: `setup.exe` must be tested before the generic
+          # `.exe` rule, otherwise a hashtable's arbitrary key order decides
+          # which suffix wins.
+          $rules = @(
+            @{ Suffix = '.setup.exe';    Magic = '4D 5A 90 00' }  # PE
+            @{ Suffix = '-portable.exe'; Magic = '4D 5A 90 00' }  # PE
+            @{ Suffix = '.msi';          Magic = 'D0 CF 11 E0' }  # OLE compound file
+            @{ Suffix = '.zip';          Magic = '50 4B 03 04' }  # ZIP
+          )
+
+          $checked = 0
+          foreach ($file in Get-ChildItem dist -File) {
+            $rule = $rules | Where-Object { $file.Name.EndsWith($_.Suffix) } | Select-Object -First 1
+            if (-not $rule) { continue }
+
+            $magic = Get-Magic $file.FullName
+            if ($magic -ne $rule.Magic) {
+              throw "$($file.Name) has unexpected magic bytes: $magic"
+            }
+            $checked++
+            Write-Host ("{0,-42} {1,7:N1} MB  [{2}]" -f $file.Name, ($file.Length / 1MB), $magic)
+          }
+
+          if ($checked -lt 4) {
+            throw "expected 4 Windows artifacts, verified only $checked"
+          }
+          Write-Host "all $checked artifacts verified"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Linux release artifacts. .deb and .AppImage, built inside the target distro
+  # so the bundled glibc and webkit versions match.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Build (Linux)
+    needs: [check, ui-tests, e2e-linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libxkbcommon-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
+            pkg-config file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build bundles
+        run: cargo tauri build --bundles deb appimage
+        working-directory: src-tauri
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          find src-tauri/target/release/bundle -type f \
+            \( -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Verify the AppImage is executable
+        run: |
+          appimage=$(find dist -name '*.AppImage' | head -1)
+          if [ -z "$appimage" ]; then echo "no AppImage produced"; exit 1; fi
+          chmod +x "$appimage"
+          # `--appimage-version` exercises the runtime without needing a display.
+          "$appimage" --appimage-version
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Publish. Only on a version tag, and only after every build and test job has
+  # passed, so a red CI run can never produce a release.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List what will be published
+        run: find artifacts -type f | sort
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          draft: true
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            | Platform | File |
+            | --- | --- |
+            | Windows — no install | `Ghostwriter-*-portable.exe` |
+            | Windows — installer | `Ghostwriter-*.msi` or `*.setup.exe` |
+            | Debian / Ubuntu | `ghostwriter_*.deb` |
+            | Any Linux | `ghostwriter_*.AppImage` |
+
+            Windows builds need the **WebView2** runtime, which ships with
+            Windows 11 and is present on almost all Windows 10 machines. If the
+            window appears blank, install it once from
+            https://developer.microsoft.com/microsoft-edge/webview2/
+
+            The portable `.exe` needs no installation and writes nothing to the
+            registry. Preferences are stored in
+            `%APPDATA%\dev.ghostwriter.desktop\settings.json`.

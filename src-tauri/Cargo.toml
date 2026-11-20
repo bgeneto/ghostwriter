@@ -1,0 +1,69 @@
+[package]
+name = "ghostwriter"
+version = "0.1.0"
+description = "Typeset pasted content at a human typing speed"
+authors = ["Ghostwriter"]
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+# The `_lib` suffix avoids a name clash with the binary on Windows.
+name = "ghostwriter_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Text only: drops the image codecs and keeps the binary small.
+arboard = { version = "3", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+enigo = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Only X11/XTest by default. The `wayland` and `libei` backends of enigo are
+# still experimental (and enabling libei together with x11rb can inject every
+# keystroke twice under XWayland), so they are opt-in:
+#   cargo build --features linux-wayland
+enigo = { version = "0.6", default-features = false, features = ["x11rb"] }
+# Restoring focus to the destination on resume needs a direct X connection;
+# enigo injects keys but does not expose window activation.
+x11rb = "0.13"
+
+[target.'cfg(not(any(target_os = "windows", target_os = "linux")))'.dependencies]
+enigo = "0.6"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+active-win-pos-rs = "0.11"
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# Used by tests/e2e_windows_input.rs to build a real EDIT control to type into.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+# Linux only: add the experimental enigo Wayland protocol backend.
+linux-wayland = ["enigo/wayland"]
+# Linux only: route input through the xdg-desktop-portal (GNOME 46+, KDE 6.1+).
+# Do NOT combine with the default x11rb backend; build with:
+#   cargo build --no-default-features --features linux-libei
+linux-libei = ["enigo/libei_tokio"]
+
+[profile.release]
+codegen-units = 1
+# Thin LTO keeps the build within the memory budget of CI runners; fat LTO
+# OOMed on a 64 GB workstation while linking the Tauri binary.
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = true
